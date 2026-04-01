@@ -1,191 +1,142 @@
 import os
 import streamlit as st
 from langchain_groq import ChatGroq
-from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain_core.prompts import (
-    ChatPromptTemplate, 
-    HumanMessagePromptTemplate
-)
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+from langchain_core.messages import HumanMessage, AIMessage
 from langchain_community.vectorstores import FAISS
 from langchain_community.document_loaders import PyPDFDirectoryLoader
-from langchain_google_genai import GoogleGenerativeAIEmbeddings
-from langchain.docstore.document import Document
-from langchain.chains import RetrievalQA
-
+from langchain_huggingface import HuggingFaceEmbeddings
+from langchain.chains.combine_documents import create_stuff_documents_chain
+from langchain.chains import create_retrieval_chain, create_history_aware_retriever
 from dotenv import load_dotenv
-import hashlib
-import pickle
 
-# Load environment variables from a .env file
 load_dotenv()
-groq_api_key = os.getenv("GROQ_API_KEY")  # Retrieve the API key for Groq
+groq_api_key = os.getenv("GROQ_API_KEY")
 
-# Streamlit setup
-st.set_page_config(page_title="Bhagavad Gita GPT", page_icon="🕉️")  # Set the page configuration for the Streamlit app
+# ── Page config ───────────────────────────────────────────
+st.set_page_config(page_title="Bhagavad Gita GPT", page_icon="🕉️")
 
-# Display an image of Krishna in the sidebar
-st.sidebar.image("images/krishna.png", use_column_width=True)
-
-# Display information about the Bhagavad Gita in the sidebar
+# ── Sidebar ───────────────────────────────────────────────
+st.sidebar.image("images/krishna.png", width=300)  
 st.sidebar.markdown("""
 # Welcome to the Bhagavad Gita Q&A
 
-## What is the Bhagavad Gita?
+The **Bhagavad Gita** is a 700-verse Hindu scripture, written as a dialogue 
+between Prince Arjuna and Lord Krishna. Its teachings on duty, righteousness, 
+and spirituality continue to inspire millions worldwide.
 
-The **Bhagavad Gita**, often referred to simply as the **Gita**, is a 700-verse Hindu scripture that is part of the Indian epic Mahabharata. It is a sacred text of the Hindu religion and is considered one of the most important spiritual classics in history. The Gita is written in the form of a dialogue between Prince Arjuna and the god Krishna, who serves as his charioteer.
-
-## Why is the Bhagavad Gita Important?
-
-### Spiritual and Philosophical Significance
-The Bhagavad Gita addresses the moral and philosophical dilemmas faced by Arjuna on the battlefield of Kurukshetra. It provides profound insights into duty, righteousness, and the nature of reality. The Gita discusses various paths to spiritual enlightenment, including devotion, knowledge, and disciplined action. Its teachings have influenced countless individuals and continue to offer guidance on leading a life of virtue and wisdom.
-
-### Universal Teachings
-The Gita transcends religious boundaries and speaks to universal human concerns. Its teachings on the nature of the self, the importance of duty, and the pursuit of spiritual knowledge resonate with people from various cultural and spiritual backgrounds. The text emphasizes the importance of living according to one's principles while remaining detached from the outcomes of one's actions.
-
-### Historical and Cultural Impact
-The Bhagavad Gita has had a significant impact on Indian culture and philosophy, and its influence extends globally. It has been studied and commented upon by numerous scholars, philosophers, and spiritual leaders. The Gita's teachings have inspired various movements and continue to be a source of inspiration for personal and collective transformation.
-
-Feel free to ask questions about the Bhagavad Gita, and explore its timeless wisdom through this application!
+Feel free to ask questions and explore its timeless wisdom!
 """)
 
-# Path to your image file
-image_path = "images/sacred_book_1.png"  # Replace with the path to your image file
-
-# Display the main image and title on the main page
+# ── Main header ───────────────────────────────────────────
 col1, col2 = st.columns([1, 7])
 with col1:
-    st.image(image_path, width=100)  # Display the image with a width of 100 pixels
+    st.image("images/sacred_book_1.png", width=100)
 with col2:
-    st.markdown("<h1 style='display: flex; align-items: center;'>Bhagavad Gita Q&A</h1>", unsafe_allow_html=True)
+    st.markdown("<h1>Bhagavad Gita Q&A</h1>", unsafe_allow_html=True)
 
-# Set up the language model for answering questions
-llm = ChatGroq(groq_api_key=groq_api_key, model_name="llama3-8b-8192")
+# ── Backend ───────────────────────────────────────────────
+VECTOR_STORE_PATH = "vector_store/index.faiss"
 
-# Define the prompt template for generating responses
-template_string = """
-You are a highly knowledgeable expert in the Bhagavad Gita, familiar with its teachings, context, and interpretations. Your task is to provide a well-informed, precise, and contextually accurate answer based on the provided excerpt from the Bhagavad Gita.
-
-**Context:**
-{context}
-
-**Question:**
-{input}
-
-**Instructions:**
-- Analyze the provided context thoroughly to ensure your answer is grounded in the specific teachings or verses from the Bhagavad Gita.
-- Your response should directly address the question posed, reflecting the philosophical, spiritual, or practical insights found in the Bhagavad Gita.
-- If applicable, reference specific verses or concepts from the text to support your answer.
-- Ensure clarity and coherence in your explanation, avoiding unnecessary jargon and making complex ideas accessible.
-
-**Answer:**
-"""
-
-# Create a ChatPromptTemplate instance from the prompt template string
-prompt = ChatPromptTemplate.from_messages([
-    HumanMessagePromptTemplate.from_template(template_string)
-])
-
-# Define paths for storing vector and metadata files
-VECTOR_STORE_PATH = "vector_store/faiss_index"
-METADATA_STORE_PATH = "vector_store/doc_metadata.pkl"
-
-def compute_doc_hash(doc):
-    """Compute a hash for a document to identify changes."""
-    return hashlib.md5(doc.page_content.encode('utf-8')).hexdigest()
-
-# Dont call this function once the db is created, so instead of commenting this just remove or keep ore move the folder files of gita folder somewhere
- 
 def initialize_vector_store():
-    """Initialize the vector store: create it if it doesn't exist, or load it if it does, and update with new documents."""
-    # Initialize embeddings model
-    embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001")
-    
+    embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")  
+
     if os.path.exists(VECTOR_STORE_PATH):
-        # Load existing vector store if it exists
-        vectors = FAISS.load_local(VECTOR_STORE_PATH, embeddings, allow_dangerous_deserialization=True)
-        
-        if os.path.exists(METADATA_STORE_PATH):
-            # Load existing metadata if it exists
-            with open(METADATA_STORE_PATH, 'rb') as f:
-                existing_metadata = pickle.load(f)
-        else:
-            existing_metadata = {}
+        # Load existing FAISS index
+        return FAISS.load_local(
+            VECTOR_STORE_PATH,
+            embeddings,
+            allow_dangerous_deserialization=True
+        )
     else:
-        # Create a new vector store if it does not exist
-        vectors = None
-        existing_metadata = {}
+        # Create new FAISS index
+        loader = PyPDFDirectoryLoader("./pdfs")
+        docs = loader.load()
 
-    # Load and split documents
-    loader = PyPDFDirectoryLoader("./BhagavadGita")
-    docs = loader.load()
-    text_splitter = RecursiveCharacterTextSplitter(chunk_size=2000, chunk_overlap=500)
-    new_documents = text_splitter.split_documents(docs)
-    
-    new_embeddings = []
-    new_doc_hashes = []
-    
-    for doc in new_documents:
-        doc_hash = compute_doc_hash(doc)
-        if doc_hash not in existing_metadata:
-            # If the document is new or has changed, embed and add it to the index
-            new_embeddings.append(doc)
-            new_doc_hashes.append(doc_hash)
-    
-    if new_embeddings:  # If there are new documents
-        if vectors is None:
-            vectors = FAISS.from_documents(new_embeddings, embeddings)
-        else:
-            vectors.add_documents(new_embeddings)
-        
-        # Update the metadata store with new documents
-        for doc, doc_hash in zip(new_embeddings, new_doc_hashes):
-            existing_metadata[doc_hash] = doc.metadata
-        
-        # Save the updated vector store and metadata
+        splitter = RecursiveCharacterTextSplitter(
+            chunk_size=2000,
+            chunk_overlap=500
+        )
+        chunks = splitter.split_documents(docs)
+
+        vectors = FAISS.from_documents(chunks, embeddings)
         vectors.save_local(VECTOR_STORE_PATH)
-        with open(METADATA_STORE_PATH, 'wb') as f:
-            pickle.dump(existing_metadata, f)
-    else:
-        st.write("")
-        # st.write("No new documents to embed.")
-    
-    return vectors
+        return vectors
 
-# Initialize the vector store before rendering the UI
-vectors = initialize_vector_store()
-
-# Add custom HTML and CSS to style the label
-st.markdown("""
-    <style>
-    .custom-label {
-        font-size: 24px; /* Adjust the font size */
-        font-weight: bold; /* Make the text bold */
-        margin-bottom: 10px; /* Add some space below the label */
-        align-items: center; /* Center the label horizontally */
-        display: flex;
-    }
-    </style>
-    <div class="custom-label">
-        Ask your questions to Lord Krishna!
-    </div>
-""", unsafe_allow_html=True)
-
-# Text input field with an empty label
-prompt1 = st.text_input(
-    label=" ",  # Empty label
-    placeholder="Be precise with your question for a better response..."
-)
-
-if prompt1:
-    # Set up retrieval QA chain for answering questions
-    retriever = vectors.as_retriever()
-    retrieval_qa_chain = RetrievalQA.from_chain_type(
-        llm=llm,
-        chain_type="stuff",
-        retriever=retriever,
-        return_source_documents=True
+def build_chain(vectors):
+    llm = ChatGroq(
+        api_key=groq_api_key,
+        model_name="llama-3.3-70b-versatile", 
+        temperature=0.2
     )
 
-    # Get the response from the QA chain
-    response = retrieval_qa_chain({"query": prompt1})
-    st.write(response["result"])
+    retriever = vectors.as_retriever(search_kwargs={"k": 3})
+
+    # History aware retriever
+    contextualize_prompt = ChatPromptTemplate.from_messages([
+        ("system", "Given chat history and latest question, reformulate it as a standalone question. Don't answer it."),
+        MessagesPlaceholder("chat_history"),
+        ("human", "{input}")
+    ])
+    history_aware_retriever = create_history_aware_retriever(
+        llm, retriever, contextualize_prompt
+    )
+
+    # Answer prompt ✅ updated from old HumanMessagePromptTemplate style
+    answer_prompt = ChatPromptTemplate.from_messages([
+        ("system", """You are a highly knowledgeable expert in the Bhagavad Gita.
+         Answer ONLY from the context below. If the answer is not in the context,
+         say 'I don't know.' Reference specific verses where applicable.
+         
+         Context: {context}"""),
+        MessagesPlaceholder("chat_history"),
+        ("human", "{input}")
+    ])
+
+    document_chain  = create_stuff_documents_chain(llm, answer_prompt)
+    retrieval_chain = create_retrieval_chain(history_aware_retriever, document_chain)
+    return retrieval_chain
+
+# ── Session state ─────────────────────────────────────────
+if "chat_history" not in st.session_state:
+    st.session_state.chat_history = []
+
+if "messages" not in st.session_state:
+    st.session_state.messages = []
+
+if "chain" not in st.session_state:
+    with st.spinner("Loading Bhagavad Gita knowledge base..."):
+        vectors = initialize_vector_store()
+        st.session_state.chain = build_chain(vectors)
+
+# ── Chat UI ───────────────────────────────────────────────
+st.markdown("### 🙏 Ask your questions to Lord Krishna!")
+
+for msg in st.session_state.messages:
+    with st.chat_message(msg["role"]):
+        st.write(msg["content"])
+
+if question := st.chat_input("Be precise with your question for a better response..."):
+
+    with st.chat_message("user"):
+        st.write(question)
+    st.session_state.messages.append({"role": "user", "content": question})
+
+    with st.chat_message("assistant"):
+        with st.spinner("Seeking wisdom..."):
+            result = st.session_state.chain.invoke({
+                "input": question,
+                "chat_history": st.session_state.chat_history
+            })
+            answer = result["answer"]
+            st.write(answer)
+
+            with st.expander("📖 Source Verses"):
+                for i, doc in enumerate(result["context"]):
+                    st.markdown(f"**Source {i+1} (page {doc.metadata.get('page', '?')}):**")
+                    st.caption(doc.page_content[:300])
+
+    st.session_state.messages.append({"role": "assistant", "content": answer})
+    st.session_state.chat_history.append(HumanMessage(content=question))
+    st.session_state.chat_history.append(AIMessage(content=answer))
