@@ -1,4 +1,6 @@
-.env
-.vscode
-.dist
-myenv
+vector_store/       # ← don't push your FAISS index (large files)
+__pycache__/        # ← Python cache files
+*.pyc               # ← compiled Python files
+*.pyo
+.DS_Store           # ← Mac junk files (good practice)
+*.pkl               # ← pickle files (your old metadata store)
