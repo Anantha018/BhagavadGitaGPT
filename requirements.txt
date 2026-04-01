@@ -5,6 +5,7 @@ langchain-groq
 langchain-huggingface
 langchain-text-splitters
 langchain-core
+langsmith==0.1.147
 sentence-transformers
 faiss-cpu
 pypdf
